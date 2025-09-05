@@ -1,0 +1,64 @@
+{
+  "data": {
+    "input_path": "/path/to/llava_cot_dataset.json",
+    "image_dir": "/path/to/images",
+    "max_samples": null,
+    "limit_to_first_half": false,
+    "comment": "max_samples: limit total samples to process; limit_to_first_half: only process first 50% of data"
+  },
+  
+  "api_keys": {
+    "openai": "your-openai-api-key-here",
+    "comment": "Replace with your actual OpenAI API key"
+  },
+  
+  "models": {
+    "vlm_model": "gpt-4o",
+    "cot_model": "gpt-4o",
+    "quality_model": "gpt-4o",
+    "use_object_detection": true,
+    "use_ocr": true,
+    "ocr_fallback_on_error": true,
+    "grounding_dino_config": {
+      "use_real_model": false,
+      "config_path": "/path/to/GroundingDINO_SwinT_OGC.py",
+      "checkpoint_path": "/path/to/groundingdino_swint_ogc.pth",
+      "box_threshold": 0.35,
+      "text_threshold": 0.25,
+      "comment": "Set use_real_model to true to enable Grounding DINO"
+    },
+    "comment": "Model configurations"
+  },
+  
+  "processing": {
+    "batch_size": 32,
+    "device": "cuda",
+    "api_delay": 0.5,
+    "use_llm_answer_extraction": false,
+    "comment": "Processing settings - api_delay helps avoid rate limits"
+  },
+  
+  "quality": {
+    "min_score": 0.7,
+    "use_llm_verification": true,
+    "llm_sample_rate": 0.1,
+    "keep_failed_samples": false,
+    "comment": "Quality control settings"
+  },
+  
+  "sampling": {
+    "enabled": true,
+    "target_size": 50000,
+    "strategy": "hybrid",
+    "diversity_weight": 0.3,
+    "seed": 42,
+    "comment": "Sampling settings - strategies: quality_first, stratified, diversity, hybrid"
+  },
+  
+  "output": {
+    "output_path": "/path/to/output/cleaned_dataset.jsonl",
+    "save_intermediate": true,
+    "intermediate_dir": "/path/to/output/intermediate",
+    "comment": "Output settings - intermediate saves help recover from failures"
+  }
+}
