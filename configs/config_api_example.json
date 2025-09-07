@@ -14,36 +14,33 @@
   
   "models": {
     "vlm_model": "gpt-4o",
-    "cot_model": "gpt-4o",
+    "cot_model": "gpt-4o", 
     "quality_model": "gpt-4o",
     "use_object_detection": true,
     "use_ocr": true,
     "ocr_fallback_on_error": true,
     "grounding_dino_config": {
       "use_real_model": false,
-      "config_path": "/path/to/GroundingDINO_SwinT_OGC.py",
-      "checkpoint_path": "/path/to/groundingdino_swint_ogc.pth",
+      "use_api": true,
+      "api_config": {
+        "endpoint": "http://your-grounding-dino-api-server:8000/detect",
+        "api_key": "your-api-key-if-needed",
+        "timeout": 30,
+        "max_retries": 3
+      },
       "box_threshold": 0.35,
       "text_threshold": 0.25,
-      "use_api": false,
-      "api_config": {
-        "endpoint": "http://localhost:8000/detect",
-        "api_key": "",
-        "timeout": 30,
-        "max_retries": 3,
-        "comment": "API configuration for remote Grounding DINO service"
-      },
-      "comment": "Set use_real_model to true for local GPU model, use_api to true for remote API calls"
+      "comment": "API mode enabled for Grounding DINO - perfect for servers without GPU"
     },
-    "comment": "Model configurations"
+    "comment": "Model configurations - using API for object detection"
   },
   
   "processing": {
     "batch_size": 32,
-    "device": "cuda",
+    "device": "cpu",
     "api_delay": 0.5,
     "use_llm_answer_extraction": false,
-    "comment": "Processing settings - api_delay helps avoid rate limits"
+    "comment": "CPU device since we're using API for object detection"
   },
   
   "quality": {

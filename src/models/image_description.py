@@ -7,8 +7,22 @@ import base64
 import time
 from io import BytesIO
 from abc import ABC, abstractmethod
-import supervision as sv
+
+# Optional imports
+try:
+    import supervision as sv
+    SUPERVISION_AVAILABLE = True
+except ImportError:
+    sv = None
+    SUPERVISION_AVAILABLE = False
+
 import torch
+
+# Optional import for API functionality
+try:
+    import requests
+except ImportError:
+    requests = None
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +114,9 @@ class ObjectDetector(BaseModel):
         checkpoint_path: Optional[str] = None,
         device: str = "cuda",
         box_threshold: float = 0.35,
-        text_threshold: float = 0.25
+        text_threshold: float = 0.25,
+        use_api: bool = False,
+        api_config: Optional[Dict] = None
     ):
         self.use_real_model = use_real_model
         self.config_path = config_path
@@ -108,11 +124,53 @@ class ObjectDetector(BaseModel):
         self.device = device
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
+        self.use_api = use_api
+        self.api_config = api_config or {}
         self.model = None
         self.model_initialized = False
+        self.api_client = None
         
-        if self.use_real_model:
+        if self.use_api:
+            self.initialize_api_client()
+        elif self.use_real_model:
             self.initialize_model()
+
+    def initialize_api_client(self):
+        """Initialize API client for Grounding DINO service"""
+        if not self.use_api:
+            return
+            
+        if requests is None:
+            logger.error("requests library not installed. Please install with: pip install requests")
+            self.use_api = False
+            return
+            
+        try:
+            # Set default API configuration
+            self.api_endpoint = self.api_config.get('endpoint', 'http://localhost:8000/detect')
+            self.api_key = self.api_config.get('api_key', '')
+            self.api_timeout = self.api_config.get('timeout', 30)
+            self.max_retries = self.api_config.get('max_retries', 3)
+            
+            # Test connection
+            headers = {'Authorization': f'Bearer {self.api_key}'} if self.api_key else {}
+            test_response = requests.get(
+                self.api_endpoint.replace('/detect', '/health'),
+                headers=headers,
+                timeout=5
+            )
+            
+            if test_response.status_code == 200:
+                logger.info("Grounding DINO API client initialized successfully")
+                self.api_client = requests.Session()
+                self.api_client.headers.update(headers)
+            else:
+                logger.warning(f"API health check failed with status {test_response.status_code}")
+                self.use_api = False
+                
+        except Exception as e:
+            logger.warning(f"Failed to initialize API client: {str(e)}. Falling back to placeholder mode.")
+            self.use_api = False
 
     def initialize_model(self):
         if not self.use_real_model or self.model_initialized:
@@ -141,6 +199,10 @@ class ObjectDetector(BaseModel):
         image: Image.Image, 
         text_prompt: str = "all objects in the image"
     ) -> Dict[str, List]:
+        # Priority: API > Real Model > Placeholder
+        if self.use_api:
+            return self._detect_with_api(image, text_prompt)
+        
         if not self.use_real_model:
             return self._generate_placeholder(text_prompt)
         
@@ -179,6 +241,62 @@ class ObjectDetector(BaseModel):
             logger.error(f"Grounding DINO prediction failed: {str(e)}")
             return self._generate_placeholder(text_prompt)
 
+    def _detect_with_api(self, image: Image.Image, text_prompt: str) -> Dict[str, List]:
+        """Detect objects using Grounding DINO API service"""
+        if not self.api_client:
+            logger.warning("API client not initialized, falling back to placeholder")
+            return self._generate_placeholder(text_prompt)
+        
+        # Convert PIL Image to base64
+        buffered = BytesIO()
+        image.save(buffered, format="PNG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
+        
+        # Prepare API request payload
+        payload = {
+            "image": img_base64,
+            "text_prompt": text_prompt,
+            "box_threshold": self.box_threshold,
+            "text_threshold": self.text_threshold
+        }
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = self.api_client.post(
+                    self.api_endpoint,
+                    json=payload,
+                    timeout=self.api_timeout
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Ensure the response has the expected structure
+                    detections = {
+                        "objects": result.get("objects", result.get("phrases", [])),
+                        "boxes": result.get("boxes", []),
+                        "scores": result.get("scores", result.get("logits", []))
+                    }
+                    
+                    logger.info(f"API detection successful: found {len(detections['objects'])} objects")
+                    return detections
+                else:
+                    logger.warning(f"API request failed with status {response.status_code}: {response.text}")
+                    
+            except requests.Timeout:
+                logger.warning(f"API request timeout (attempt {attempt + 1}/{self.max_retries})")
+            except requests.RequestException as e:
+                logger.warning(f"API request failed (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error in API detection: {str(e)}")
+                
+            # Exponential backoff
+            if attempt < self.max_retries - 1:
+                time.sleep(2 ** attempt)
+        
+        logger.error(f"API detection failed after {self.max_retries} attempts, using placeholder")
+        return self._generate_placeholder(text_prompt)
+    
     def _generate_placeholder(self, text_prompt: str) -> Dict[str, List]:
         logger.info(f"Using placeholder for object detection with prompt: '{text_prompt}'")
         return {
@@ -189,6 +307,10 @@ class ObjectDetector(BaseModel):
     
     def _annotate_image(self, image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
         """Annotate image with detections for visualization/debugging"""
+        if not SUPERVISION_AVAILABLE:
+            logger.warning("Supervision library not available for annotation")
+            return image_source
+            
         detections = sv.Detections(
             xyxy=sv.BoxAnnotator.sv_to_sa(boxes.cpu().numpy()),
             confidence=logits.cpu().numpy(),
@@ -300,7 +422,9 @@ class ImageFormalDescriptionGenerator:
                 checkpoint_path=dino_config.get('checkpoint_path'),
                 device=device,
                 box_threshold=dino_config.get('box_threshold', 0.35),
-                text_threshold=dino_config.get('text_threshold', 0.25)
+                text_threshold=dino_config.get('text_threshold', 0.25),
+                use_api=dino_config.get('use_api', False),
+                api_config=dino_config.get('api_config', {})
             )
         
         if use_ocr:
