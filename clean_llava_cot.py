@@ -170,6 +170,7 @@ class LLaVACoTCleaner:
             self.logger.debug(f"Generating formal description for {sample_id}")
             description_result = self.description_generator.generate_formal_description(
                 image=image,
+                image_path=sample['image_path'],
                 question=sample.get('question'),
                 existing_cot=sample.get('original_cot')
             )

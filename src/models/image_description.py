@@ -196,12 +196,21 @@ class ObjectDetector(BaseModel):
 
     def generate(
         self, 
-        image: Image.Image, 
+        image_path: str, 
         text_prompt: str = "all objects in the image"
     ) -> Dict[str, List]:
         # Priority: API > Real Model > Placeholder
         if self.use_api:
-            return self._detect_with_api(image, text_prompt)
+            # For API mode, we need to load PIL image from path
+            try:
+                from PIL import Image
+                pil_image = Image.open(image_path)
+                if pil_image.mode != 'RGB':
+                    pil_image = pil_image.convert('RGB')
+                return self._detect_with_api(pil_image, text_prompt)
+            except Exception as e:
+                logger.error(f"Failed to load image for API: {str(e)}")
+                return self._generate_placeholder(text_prompt)
         
         if not self.use_real_model:
             return self._generate_placeholder(text_prompt)
@@ -212,20 +221,38 @@ class ObjectDetector(BaseModel):
         
         try:
             from groundingdino.util.inference import load_image, predict
+            import torch.nn.functional as F
 
             # Load and transform image
-            image_source, image_tensor = load_image(image)
+            image_source, image_tensor = load_image(image_path)
 
-            # Run inference
-            boxes, logits, phrases = predict(
-                model=self.model,
-                image=image_tensor,
-                caption=text_prompt,
-                box_threshold=self.box_threshold,
-                text_threshold=self.text_threshold,
-                device=self.device
-            )
-
+            # Run inference with a retry mechanism for tensor size mismatch
+            for attempt in range(2):
+                try:
+                    boxes, logits, phrases = predict(
+                        model=self.model,
+                        image=image_tensor,
+                        caption=text_prompt,
+                        box_threshold=self.box_threshold,
+                        text_threshold=self.text_threshold,
+                        device=self.device
+                    )
+                    break  # Success
+                
+                except Exception as e:
+                    if "The size of tensor a" in str(e) and "must match the size of tensor b" in str(e) and attempt == 0:
+                        logger.warning(f"Tensor size mismatch error for {image_path}. Retrying with padding.")
+                        
+                        # Pad the image tensor to be divisible by 32
+                        h, w = image_tensor.shape[-2:]
+                        pad_h = (32 - h % 32) % 32
+                        pad_w = (32 - w % 32) % 32
+                        image_tensor = F.pad(image_tensor, (0, pad_w, 0, pad_h))
+                        
+                        continue # Retry with padded tensor
+                    else:
+                        raise e # Re-raise other errors or on second attempt
+            
             # Annotate image (optional, for debugging)
             # annotated_frame = self._annotate_image(image_source, boxes, logits, phrases)
             
@@ -457,6 +484,7 @@ Return only the category name."""
     def generate_formal_description(
         self,
         image: Image.Image,
+        image_path: Optional[str] = None,
         question: Optional[str] = None,
         existing_cot: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -485,7 +513,21 @@ Be precise about:
         object_info = {}
         if self.use_object_detection and image_type in ['natural_scene', 'diagram', 'mixed']:
             try:
-                detections = self.object_detector.generate(image)
+                if image_path:
+                    # Use image path for Grounding DINO
+                    detections = self.object_detector.generate(image_path)
+                else:
+                    # Fallback: save image temporarily if no path provided
+                    import tempfile
+                    import os
+                    temp_path = tempfile.mktemp(suffix='.jpg')
+                    image.save(temp_path)
+                    try:
+                        detections = self.object_detector.generate(temp_path)
+                    finally:
+                        if os.path.exists(temp_path):
+                            os.unlink(temp_path)
+                
                 object_info = {
                     "detected_objects": detections.get("objects", []),
                     "bounding_boxes": detections.get("boxes", [])

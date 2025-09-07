@@ -15,7 +15,7 @@ class ParallelProcessor:
     
     def __init__(
         self,
-        max_workers: int = 4,
+        max_workers: int = 32,
         use_threading: bool = True,
         timeout: Optional[int] = None,
         retry_failed: bool = True,

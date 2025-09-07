@@ -133,3 +133,5 @@ configs/config_prod.json
 *.tmp
 .DS_Store
 Thumbs.db
+
+.data/
