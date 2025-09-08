@@ -1,17 +1,17 @@
 {
-  "timestamp": "2025-09-07T21:01:32.062223",
-  "current_batch": 97,
+  "timestamp": "2025-09-08T09:52:27.376081",
+  "current_batch": 405,
   "total_batches": 771,
-  "processed_count": 6208,
+  "processed_count": 25920,
   "failed_count": 0,
   "stats": {
     "total_samples": 49291,
-    "processed_samples": 4018,
-    "passed_samples": 4018,
+    "processed_samples": 24862,
+    "passed_samples": 24862,
     "failed_samples": 0,
     "errors": 0,
     "processing_time": 0,
     "retries": 0
   },
-  "config_hash": 7368655341855624254
+  "config_hash": "41a08e2295b7f847783d00f3fada43ac23b97d73d06fcec29d94a5c7de4185a9"
 }

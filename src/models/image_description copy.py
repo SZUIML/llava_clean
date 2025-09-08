@@ -91,26 +91,19 @@ Be precise and factual. Avoid subjective interpretations."""
                             ]
                         }
                     ],
-                    max_tokens=8192,
-                    temperature=0.6
+                    max_tokens=500,
+                    temperature=0.1
                 )
                 
-                result = response.choices[0].message.content
-                if result is None:
-                    logger.warning(f"VLM API returned None content")
-                    result = ""
-                else:
-                    result = result.strip()
-                logger.debug(f"VLM API returned description of length: {len(result)}")
-                return result
+                return response.choices[0].message.content.strip()
                 
             except Exception as e:
-                logger.warning(f"VLM API attempt {attempt + 1} failed: {str(e)}")
+                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
                 else:
                     logger.error(f"Failed to generate description after {self.max_retries} attempts")
-                    return ""  # Return empty string instead of raising exception
+                    raise
 
 
 class ObjectDetector(BaseModel):
@@ -201,31 +194,6 @@ class ObjectDetector(BaseModel):
             logger.error(f"Failed to initialize Grounding DINO: {str(e)}")
             self.use_real_model = False
 
-    def _pad_image_to_stride_file(self, image_path: str, stride: int = 32) -> Optional[str]:
-        """Pad image on disk to make width/height multiples of `stride`. Return temp file path or None."""
-        try:
-            from PIL import Image
-            import tempfile, os
-
-            img = Image.open(image_path).convert("RGB")
-            w, h = img.size
-            new_w = ((w + stride - 1) // stride) * stride
-            new_h = ((h + stride - 1) // stride) * stride
-            if new_w == w and new_h == h:
-                return None
-
-            padded = Image.new("RGB", (new_w, new_h), (0, 0, 0))
-            padded.paste(img, (0, 0))
-
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            padded.save(tmp.name, format="PNG")
-            tmp_path = tmp.name
-            tmp.close()
-            return tmp_path
-        except Exception as e:
-            logger.warning(f"Failed to pad image on disk: {e}")
-            return None
-
     def generate(
         self, 
         image_path: str, 
@@ -233,6 +201,7 @@ class ObjectDetector(BaseModel):
     ) -> Dict[str, List]:
         # Priority: API > Real Model > Placeholder
         if self.use_api:
+            # For API mode, we need to load PIL image from path
             try:
                 from PIL import Image
                 pil_image = Image.open(image_path)
@@ -252,54 +221,64 @@ class ObjectDetector(BaseModel):
         
         try:
             from groundingdino.util.inference import load_image, predict
-            import os
+            import torch.nn.functional as F
 
-            # 1) 正常推理
+            # Load and transform image
             image_source, image_tensor = load_image(image_path)
-            try:
-                boxes, logits, phrases = predict(
-                    model=self.model,
-                    image=image_tensor,
-                    caption=text_prompt,
-                    box_threshold=self.box_threshold,
-                    text_threshold=self.text_threshold,
-                    device=self.device
-                )
-            except Exception as e1:
-                err_msg = str(e1)
-                # 2) 如果尺寸不匹配，改为对原图做磁盘填充后重试
-                if "must match the size of tensor b" in err_msg or "size of tensor" in err_msg:
-                    logger.warning(f"Tensor size mismatch for {image_path}. Retrying with disk padding to stride 32.")
-                    padded_path = self._pad_image_to_stride_file(image_path, stride=32)
-                    try:
-                        if padded_path:
-                            image_source, image_tensor = load_image(padded_path)
-                            boxes, logits, phrases = predict(
-                                model=self.model,
-                                image=image_tensor,
-                                caption=text_prompt,
-                                box_threshold=self.box_threshold,
-                                text_threshold=self.text_threshold,
-                                device=self.device
-                            )
-                        else:
-                            # 无需填充或填充失败，直接抛出原错误
-                            raise e1
-                    finally:
-                        if padded_path and os.path.exists(padded_path):
-                            try:
-                                os.unlink(padded_path)
-                            except Exception:
-                                pass
-                else:
-                    # 非尺寸错误，继续抛出
-                    raise e1
+
+            # Run inference with a retry mechanism for tensor size mismatch
+            for attempt in range(2):
+                try:
+                    boxes, logits, phrases = predict(
+                        model=self.model,
+                        image=image_tensor,
+                        caption=text_prompt,
+                        box_threshold=self.box_threshold,
+                        text_threshold=self.text_threshold,
+                        device=self.device
+                    )
+                    break  # Success
+                
+                except RuntimeError as e:
+                    if "The size of tensor a" in str(e) and "must match the size of tensor b" in str(e) and attempt == 0:
+                        logger.warning(f"Tensor size mismatch error for {image_path}. Retrying with padding.")
+                        
+                        # Reload image with proper padding
+                        from PIL import Image
+                        import torchvision.transforms as T
+                        
+                        # Load PIL image
+                        pil_image = Image.open(image_path).convert('RGB')
+                        
+                        # Get original dimensions
+                        orig_w, orig_h = pil_image.size
+                        
+                        # Calculate new dimensions (must be divisible by 32)
+                        new_h = ((orig_h + 31) // 32) * 32
+                        new_w = ((orig_w + 31) // 32) * 32
+                        
+                        # Resize image to new dimensions with padding
+                        transform = T.Compose([
+                            T.Resize((new_h, new_w)),
+                            T.ToTensor(),
+                            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                        ])
+                        
+                        image_tensor = transform(pil_image).unsqueeze(0).to(self.device)
+                        
+                        continue # Retry with properly sized tensor
+                    else:
+                        raise # Re-raise other errors or on second attempt
+            
+            # Annotate image (optional, for debugging)
+            # annotated_frame = self._annotate_image(image_source, boxes, logits, phrases)
             
             detections = {
                 "objects": phrases,
-                "boxes": boxes.tolist() if hasattr(boxes, "tolist") else boxes,
-                "scores": logits.tolist() if hasattr(logits, "tolist") else logits
+                "boxes": boxes.tolist(),
+                "scores": logits.tolist()
             }
+            
             return detections
 
         except Exception as e:
@@ -529,13 +508,9 @@ Return only the category name."""
         
         logger.info("Generating formal image description")
         
-        try:
-            # Step 1: Identify image type
-            image_type = self.identify_image_type(image)
-            logger.info(f"Image type identified as: {image_type}")
-        except Exception as e:
-            logger.error(f"Failed to identify image type: {str(e)}")
-            image_type = 'mixed'
+        # Step 1: Identify image type
+        image_type = self.identify_image_type(image)
+        logger.info(f"Image type identified as: {image_type}")
         
         # Step 2: Generate dense caption
         caption_prompt = f"""Create a detailed, formal description of this {image_type} image.
@@ -549,16 +524,7 @@ Be precise about:
         if question:
             caption_prompt += f"\n\nContext: This image is related to the question: '{question}'"
         
-        try:
-            logger.info(f"Generating dense caption for {image_type} image")
-            dense_caption = self.vlm_generator.generate(image, caption_prompt)
-            logger.info(f"Dense caption generated, length: {len(dense_caption)}")
-            if not dense_caption:
-                logger.warning("Dense caption is empty, using fallback")
-                dense_caption = "Unable to generate image description."
-        except Exception as e:
-            logger.error(f"Failed to generate dense caption: {str(e)}")
-            dense_caption = "Unable to generate image description."
+        dense_caption = self.vlm_generator.generate(image, caption_prompt)
         
         # Step 3: Extract objects if applicable
         object_info = {}
@@ -621,21 +587,7 @@ Dense Caption: {dense_caption}
 
 Format: A single paragraph of formal description."""
         
-        try:
-            logger.info("Generating final synthesized description")
-            final_description = self.vlm_generator.generate(image, synthesis_prompt)
-            logger.info(f"Final description generated, length: {len(final_description)}")
-            
-            if not final_description:
-                logger.warning("Final description is empty, using dense caption as fallback")
-                final_description = dense_caption
-        except Exception as e:
-            logger.error(f"Failed to generate final description: {str(e)}, using dense caption")
-            final_description = dense_caption
-        
-        if not final_description:
-            logger.error("Final description is still empty!")
-            final_description = "Unable to generate image description."
+        final_description = self.vlm_generator.generate(image, synthesis_prompt)
         
         return {
             "image_formal_description": final_description,

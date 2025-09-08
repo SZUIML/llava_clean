@@ -5,6 +5,7 @@ from typing import Dict, List, Any, Optional
 import logging
 from datetime import datetime
 import pickle
+import hashlib  # 新增
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,13 @@ class CheckpointManager:
         self.current_checkpoint_file = self.checkpoint_dir / "current_checkpoint.json"
         self.processed_ids_file = self.checkpoint_dir / "processed_ids.pkl"
         self.failed_ids_file = self.checkpoint_dir / "failed_ids.pkl"
+
+    def _stable_config_hash(self, config: Dict[str, Any]) -> str:
+        """对配置进行稳定哈希，跨进程/重启保持一致"""
+        # 使用紧凑 JSON，确保序列化稳定
+        s = json.dumps(config, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
         
     def save_checkpoint(
         self,
@@ -36,7 +44,7 @@ class CheckpointManager:
             "processed_count": len(processed_ids),
             "failed_count": len(failed_ids),
             "stats": stats,
-            "config_hash": hash(json.dumps(config, sort_keys=True))
+            "config_hash": self._stable_config_hash(config)
         }
         
         # 保存主检查点信息
@@ -66,7 +74,7 @@ class CheckpointManager:
                 checkpoint = json.load(f)
             
             # 检查配置是否改变
-            current_config_hash = hash(json.dumps(config, sort_keys=True))
+            current_config_hash = self._stable_config_hash(config)  # 修改：使用稳定哈希
             if checkpoint.get('config_hash') != current_config_hash:
                 logger.warning("Configuration has changed since last checkpoint. Starting fresh.")
                 return None
@@ -170,3 +178,23 @@ class CheckpointManager:
             for file_path in intermediate_files:
                 os.remove(file_path)
                 logger.info(f"Removed intermediate file: {file_path}")
+
+if __name__ == "__main__":
+    # 获取config.json的hash值用于测试
+    config_path = "./configs/config.json"
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        manager = CheckpointManager()
+        print("Config hash:", manager._stable_config_hash(config))
+    
+    # 与current_checkpoint.json中的hash值对比
+    checkpoint_path = "./checkpoints/current_checkpoint.json"
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, 'r') as f:
+            checkpoint = json.load(f)
+        print("Checkpoint config hash:", checkpoint.get("config_hash"))
+        if checkpoint.get("config_hash") == manager._stable_config_hash(config):
+            print("Hashes match, configuration is consistent.")
+    else:
+        print(f"Config file {config_path} does not exist.")
